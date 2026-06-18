@@ -1,0 +1,65 @@
+{
+  "name": "@swirls/aboard",
+  "version": "0.1.0",
+  "description": "Manage and observe agentic onboarding flows. Declare the steps an AI agent should take to onboard a user, mount them as endpoints, generate a 'copy to deploy' prompt, and track every session.",
+  "type": "module",
+  "license": "MIT",
+  "author": "ByteSlice LLC, DBA Swirls.ai",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./adapters/memory": {
+      "types": "./dist/adapters/memory.d.ts",
+      "import": "./dist/adapters/memory.js"
+    },
+    "./adapters/sqlite": {
+      "types": "./dist/adapters/sqlite.d.ts",
+      "import": "./dist/adapters/sqlite.js"
+    },
+    "./adapters/pg": {
+      "types": "./dist/adapters/pg.d.ts",
+      "import": "./dist/adapters/pg.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "SPEC.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "agent",
+    "onboarding",
+    "ai",
+    "llm",
+    "agentic",
+    "observability",
+    "claude",
+    "mcp",
+    "developer-tools"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test",
+    "example": "bun run examples/server.ts",
+    "example:agent": "bun run examples/agent.ts",
+    "prepublishOnly": "bun run build"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}

@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { aboard, memoryAdapter, signSessionToken, verifySessionToken } from "../src/index";
+import { z } from "zod";
+import { aboard, defineStep, memoryAdapter, signSessionToken, verifySessionToken } from "../src/index";
 import type { AgentIdentity, OnboardingDescriptor, OnboardingEvent } from "../src/index";
 
 const BASE = "https://api.example.com";
@@ -93,7 +94,7 @@ describe("discovery", () => {
       expect(res.headers.get("content-type")).toContain("application/json");
     }
     const desc = (await viaAccept.json()) as OnboardingDescriptor;
-    expect(desc.aboard).toBe("0.1");
+    expect(desc.aboard).toBe("0.2");
     expect(desc.session_endpoint).toBe("https://api.example.com/api/onboarding/sessions");
     expect(desc.step_endpoint_template).toBe("https://api.example.com/api/onboarding/steps/{id}");
     expect(desc.steps.map((s) => s.id)).toEqual(["auth", "create_org", "deploy"]);
@@ -338,5 +339,104 @@ describe("security", () => {
       }),
     );
     expect(res.status).toBe(413);
+  });
+});
+
+describe("typed steps (zod)", () => {
+  function typedBoard() {
+    const events: OnboardingEvent[] = [];
+    const ab = aboard({
+      database: memoryAdapter(),
+      secret: "test-secret",
+      name: "Swirls",
+      baseUrl: BASE,
+      onEvent: (e) => {
+        events.push(e);
+      },
+      steps: [
+        defineStep({
+          id: "create_org",
+          description: "Provision a workspace.",
+          input: z.object({ name: z.string().min(1), region: z.string().default("us") }),
+          output: z.object({ orgId: z.string() }),
+          // `body` is typed as { name: string; region: string } here.
+          run: ({ body }) => ({ orgId: `org_${body.name}_${body.region}` }),
+          dependsOn: [],
+        }),
+        defineStep({
+          id: "bad_output",
+          description: "Returns the wrong shape.",
+          output: z.object({ ok: z.boolean() }),
+          run: () => ({ nope: 1 }) as unknown as { ok: boolean },
+          dependsOn: [],
+        }),
+      ],
+    });
+    return { ab, events };
+  }
+
+  async function call(
+    ab: ReturnType<typeof typedBoard>["ab"],
+    id: string,
+    body: unknown,
+  ) {
+    const { body: started } = await startSession(ab);
+    const res = await ab.handler(req("POST", `/api/onboarding/steps/${id}`, { token: started.sessionToken, body }));
+    return { res, data: (await res.json()) as Record<string, unknown> };
+  }
+
+  test("valid input passes, defaults applied, output returned", async () => {
+    const { ab } = typedBoard();
+    const { res, data } = await call(ab, "create_org", { name: "acme" });
+    expect(res.status).toBe(200);
+    expect(data.output).toEqual({ orgId: "org_acme_us" });
+  });
+
+  test("invalid input → 422 with issues and a counted attempt", async () => {
+    const { ab } = typedBoard();
+    const { res, data } = await call(ab, "create_org", { name: "" });
+    expect(res.status).toBe(422);
+    expect(data.error).toBe("input_invalid");
+    expect(Array.isArray(data.issues)).toBe(true);
+    expect(data.attempts).toBe(1);
+    expect(data.next).toBe("create_org");
+  });
+
+  test("repeated invalid input trips stuck detection", async () => {
+    const { ab, events } = typedBoard();
+    const { body: started } = await startSession(ab);
+    const token = started.sessionToken;
+    for (let i = 0; i < 3; i++) {
+      await ab.handler(req("POST", "/api/onboarding/steps/create_org", { token, body: { name: 123 } }));
+    }
+    expect(events.filter((e) => e.type === "step.failed")).toHaveLength(3);
+    expect(events.some((e) => e.type === "agent.stuck")).toBe(true);
+  });
+
+  test("invalid handler output → 500, no stuck escalation", async () => {
+    const { ab, events } = typedBoard();
+    const { res, data } = await call(ab, "bad_output", {});
+    expect(res.status).toBe(500);
+    expect(data.error).toBe("step_output_invalid");
+    expect(events.some((e) => e.type === "agent.stuck")).toBe(false);
+  });
+
+  test("descriptor exposes JSON Schema for inputs and outputs", async () => {
+    const { ab } = typedBoard();
+    const desc = ab.getDescriptor();
+    const org = desc.steps.find((s) => s.id === "create_org")!;
+    expect(org.input_schema).toMatchObject({ type: "object", required: ["name"] });
+    expect((org.input_schema as Record<string, unknown>).properties).toHaveProperty("name");
+    expect(org.output_schema).toMatchObject({ type: "object" });
+    const bad = desc.steps.find((s) => s.id === "bad_output")!;
+    expect(bad.input_schema).toBeNull();
+    expect(bad.output_schema).toMatchObject({ type: "object" });
+  });
+
+  test("prompt renders the request-body JSON Schema", async () => {
+    const { ab } = typedBoard();
+    const prompt = ab.getPrompt();
+    expect(prompt).toContain("Request body");
+    expect(prompt).toContain('"name"');
   });
 });

@@ -1,14 +1,22 @@
 # aboard
 
-**An open protocol — and a library — for agentic onboarding flows.** Declare the
-steps an AI agent should take to onboard a user, mount them as discoverable API
-endpoints, hand the agent a generated prompt, and get complete visibility into
-every session.
+**An open protocol — and a library — for agentic onboarding *and* authorization.**
+Declare the steps an AI agent should take to onboard a user, mount them as
+discoverable API endpoints, hand the agent a generated prompt, and get complete
+visibility into every session — and issue **macaroon capability tokens** that
+scope, delegate, and revoke an agent's access to any OpenAPI API behind a
+deny-by-default proxy.
 
 > **Status: `0.1.0` — early but functional.** Core API + the v0.1 protocol
 > (discovery, sessions, steps, identity, revocation, stuck webhooks) are
 > implemented and tested. Expect breaking changes before `1.0`. A hosted
-> dashboard is on the roadmap. See [`SPEC.md`](./SPEC.md) for the wire protocol.
+> dashboard is on the roadmap. See [`SPEC.md`](./docs/SPEC.md) for the wire protocol.
+>
+> **Authorization (v0.3, MVP):** macaroon capability tokens, offline delegation,
+> a deny-by-default proxy for any OpenAPI API, revocation, and human-in-the-loop
+> approval — see [Authorization](#authorization--capability-tokens--the-gate)
+> below, the spec in [`docs/SPEC-AUTHZ.md`](./docs/SPEC-AUTHZ.md), and the runnable
+> walkthrough in [`BUILD_DAY_DEMO.md`](./BUILD_DAY_DEMO.md).
 
 ---
 
@@ -28,6 +36,11 @@ over **human** onboarding. `aboard` does the same for **agent** onboarding:
   JSON descriptor.
 - **Observe** every session: which steps ran, which failed, where agents got stuck.
 - **Get alerted** via webhook when an agent can't get past a step.
+
+And once the agent is working against your API, **authorize** it: hand it a
+capability token scoped to exactly the operations it may call, let it delegate a
+strictly narrower token to a sub-agent, and revoke the whole chain at any time.
+See [Authorization](#authorization--capability-tokens--the-gate).
 
 ### Complementary to `auth.md`
 
@@ -144,6 +157,44 @@ agent ──POST /api/onboarding/steps/deploy_hook ────▶ { status:"com
 A step with no `run` simply marks itself completed and records the event — useful
 when the agent does the work elsewhere (e.g. running a CLI) and reports progress.
 
+### Typed inputs & outputs (Zod)
+
+Give a step an `input` and/or `output` [Zod](https://zod.dev) schema and aboard
+will:
+
+- **validate the request body** before `run` — a bad body returns
+  `422 { error: "input_invalid", issues }` and counts as a failed attempt (so a
+  persistently-malformed agent trips stuck detection);
+- **validate the `run` return** — a mismatch is *your* bug, so it returns
+  `500 step_output_invalid` and is **not** counted against the agent;
+- **publish both as JSON Schema** in the descriptor (`input_schema` /
+  `output_schema`) and the prompt, so agents know exactly what to send instead
+  of guessing.
+
+Use the `defineStep` helper to get `ctx.body` and the `run` return type inferred
+from the schemas — no manual annotations. `zod` ships as a dependency, so it's
+already available (and bundled) — just `import { z } from "zod"`.
+
+```ts
+import { z } from "zod";
+import { aboard, defineStep } from "@swirls/aboard";
+
+defineStep({
+  id: "create_org",
+  description: "Provision a workspace via the API.",
+  input: z.object({ name: z.string().min(1) }),
+  output: z.object({ orgId: z.string() }),
+  run: async ({ body }) => {       // body is { name: string }
+    const org = await provisionOrg(body.name);
+    return { orgId: org.id };       // checked against the output schema
+  },
+});
+```
+
+Strictness around unknown keys is yours to set on the schema (`.strict()`,
+`.passthrough()`, …) — aboard doesn't impose a policy. Steps without schemas
+behave exactly as before.
+
 ### Identity (auth.md / OAuth interop)
 
 By default sessions are anonymous. To require a verified identity, provide
@@ -178,18 +229,25 @@ Two distinct tokens, deliberately separated:
   `sessionTokenTtl`), tamper-evident, sent as `Authorization: Bearer` on step
   calls. Expired or tampered tokens are rejected.
 
+When authorization is enabled (below), `POST /sessions` also mints a **capability
+token** — a macaroon scoped to the principal's authority — alongside the session
+token.
+
 ### Revocation
 
 `ab.revokeSession(id)` (or `POST /sessions/:id/revoke`) marks a session
 `abandoned`; its session token immediately stops working (`403 session_revoked`).
-The endpoint accepts the session's own token or your `adminToken`.
+The endpoint accepts the session's own token or your `adminToken`. With
+authorization enabled, revoking also **blacklists the session's capability token
+and every sub-agent token derived from it** (see [Revocation](#revocation-1)).
 
 ### Events & observability
 
 Every meaningful action records an immutable event:
 
 `session.created` · `step.started` · `step.completed` · `step.failed` ·
-`agent.stuck` · `session.completed` · `session.revoked`
+`agent.stuck` · `session.completed` · `session.revoked` ·
+`grant.minted` · `grant.exercised` · `grant.denied` · `grant.revoked`
 
 ```ts
 aboard({ /* … */, onEvent: (event) => track(event) }); // real-time
@@ -237,7 +295,7 @@ curl https://api.yourapp.com/onboarding.md
 
 The descriptor (`ab.getDescriptor()`) is the structured source of truth — steps,
 dependencies, endpoints, artifacts, and the auth requirement. The full schema is
-in [`SPEC.md`](./SPEC.md).
+in [`SPEC.md`](./docs/SPEC.md).
 
 ---
 
@@ -261,6 +319,110 @@ The generated prompt says this, tailored to your steps:
 
 ---
 
+## Authorization — capability tokens & the gate
+
+Onboarding (above) governs *what an agent does, in what order*. Authorization
+governs *what an agent is allowed to do* — and, crucially, what a **sub-agent** it
+spawns is allowed to do. aboard mints **macaroon capability tokens** and ships a
+**deny-by-default proxy** ("the gate") that enforces them in front of any OpenAPI
+API.
+
+The agent ecosystem has largely solved **authentication** (web-bot-auth,
+`auth.md`, OAuth, BetterAuth). The unsolved layer is **authorization under
+delegation**: when an agent spawns a sub-agent, how does the child provably get
+*strictly less* than the parent, with no round-trip to the issuer? API keys are
+all-or-nothing; bearer JWTs identify the caller but don't narrow. Macaroons do
+exactly this.
+
+```
+register ─▶ identity (Ed25519) ─▶ capability token, scoped to operations
+   │
+   │  attenuate offline (no server call, no key)
+   ▼
+sub-agent token (narrower)
+   │
+   ├─ GET  /orders ─▶ proxy ─ allow ─▶ upstream API   (200)
+   └─ POST /orders ─▶ proxy ─ deny             (403, never reaches upstream)
+
+revoke ─▶ root id blacklisted ─▶ token and every sub-agent token invalid
+```
+
+### Any OpenAPI spec becomes an agent gate
+
+Point the gate at an OpenAPI document and its upstream, and you get a complete
+authentication + authorization gate for that API with no code changes. The agent
+capabilities, the per-operation authorization vocabulary, and the set of paths the
+proxy guards are all **derived from the spec**:
+
+```sh
+OPENAPI_SPEC=./petstore.json  UPSTREAM_URL=https://api.petstore.internal  bun run demo:up
+```
+
+### Capability tokens
+
+A capability token is a macaroon: a root identifier plus an HMAC-chained list of
+**caveats** (restrictions). `POST /sessions` mints a root token whose caveats
+clamp it to the principal's authority — e.g. an `endpoint` caveat that allows only
+`GET /orders` and `POST /orders`. The proxy verifies the chain and evaluates the
+caveats against each request's `(method, path)`.
+
+### Offline delegation
+
+Any holder can derive a **strictly narrower** child token by appending a caveat —
+**with no signing key and no network call**. Widening is impossible by
+construction (removing or editing a caveat breaks the chain), so a parent agent
+can hand a sub-agent a token scoped to one operation and trust that it cannot do
+more.
+
+### Revocation
+
+Revoke a session and the gate **blacklists the token's root id**; the root token
+and every sub-agent token in its lineage fail on the next call. Because exercise
+always lands on the issuer/proxy, the usual "macaroons can't be revoked" objection
+doesn't apply here.
+
+### Human-in-the-loop approval
+
+A token can carry an `approval` caveat that gates a specific operation on a human's
+sign-off. The agent's attempt returns `403 approval_required` and a pending request
+appears in the admin portal, scoped to the session; once approved, the agent
+retries and it goes through.
+
+### Identity
+
+Agents authenticate with Ed25519 keys via **BetterAuth agent-auth**: an agent
+registers, gets a signed JWT, and exchanges it (through `verifyIdentity`) for a
+macaroon. The identity layer is pluggable — swap BetterAuth for any
+`verifyIdentity` implementation.
+
+### Admin portal
+
+A dashboard (`packages/admin`, TanStack Start) shows **sessions** (with their
+capability root id, one-click revoke), **agents** observed at the proxy (root and
+delegated sub-agents, with their effective grant, refreshing live), the
+**approval** queue, and the **revocation** list.
+
+### Run the authorization demo
+
+```sh
+bun run demo:up                                   # the gate + a sample API (:3000)
+ABOARD_ADMIN_TOKEN=demo-admin-token bun run --cwd packages/admin dev   # portal (:3001)
+bun run demo:agent:register                       # register this machine's identity
+
+bun run demo:agent:get / :post                    # call the API with the capability token
+bun run demo:agent:delegate && bun run demo:subagent:post   # read-only sub-agent → 403
+bun run demo:agent:delegate-approval && bun run demo:subagent:post   # → 403 approval_required
+```
+
+Or hand it to a real agent: open a Claude Code session and tell it
+*"Curl `http://localhost:3000/agent.md` and follow it."* The full walkthrough is in
+[`BUILD_DAY_DEMO.md`](./BUILD_DAY_DEMO.md); the wire spec is in
+[`docs/SPEC-AUTHZ.md`](./docs/SPEC-AUTHZ.md) and the design notes in
+[`docs/DESIGN.md`](./docs/DESIGN.md). The macaroon engine is a standalone,
+dependency-free package, [`@aboard/macaroon`](./packages/macaroon).
+
+---
+
 ## Programmatic API
 
 ```ts
@@ -269,11 +431,14 @@ const ab = aboard(config);
 ab.handler(request): Promise<Response>          // mount this
 ab.getPrompt(): string                          // markdown prompt
 ab.getDescriptor(): OnboardingDescriptor        // machine-readable descriptor
-ab.createSession({ metadata?, identity? }): Promise<{ sessionId, sessionToken, session }>
+ab.createSession({ metadata?, identity? }): Promise<{ sessionId, sessionToken, session, capabilityToken? }>
 ab.getSession(id): Promise<SessionRecord | null>
 ab.listSessions(): Promise<SessionRecord[]>
 ab.getEvents(sessionId): Promise<OnboardingEvent[]>
 ab.revokeSession(sessionId): Promise<boolean>
+ab.listRevocations(): Promise<RevocationEntry[]>          // authz
+ab.listApprovals(): Promise<ApprovalRequest[]>           // authz
+ab.decideApproval(id, "approved" | "denied"): Promise<boolean>  // authz
 ab.basePath / ab.slug / ab.wellKnownPath
 ```
 
@@ -294,6 +459,7 @@ ab.basePath / ab.slug / ab.wellKnownPath
 | `adminToken` | `string` | — | Enables + protects the read endpoints |
 | `onEvent` | `(event) => void` | — | Called for every event |
 | `onStuck` | `{ afterAttempts?, webhook? }` | `afterAttempts: 3` | Global stuck behaviour |
+| `authorization` | `AuthorizationConfig` | — | Capability tokens: keystore, `rootAuthority`, revocation + approval stores ([spec](./docs/SPEC-AUTHZ.md)) |
 
 ---
 
@@ -340,6 +506,10 @@ export const GET = (req: Request) => ab.handler(req);
 - `adminToken` (separate from `secret`) gates the built-in read endpoints and is
   compared in constant time.
 - `POST /sessions` is public unless `verifyIdentity` is set; add rate limiting if needed.
+- **Authorization:** macaroon verification is constant-time; the caveat registry
+  fails closed (an unknown caveat type or operator denies); the root key is reached
+  through a single cached operation, so it can live in a KMS/HSM. See
+  [`docs/DESIGN.md`](./docs/DESIGN.md) for the full threat model.
 
 Built in: session tokens are HMAC-signed with an expiry; incoming `metadata` is
 stripped of prototype-pollution keys (`__proto__`/`constructor`/`prototype`);
@@ -356,6 +526,10 @@ bun test          # run the test suite
 bun run typecheck # tsc --noEmit
 bun run build     # emit dist/ (JS + .d.ts)
 bun run example   # start the example Swirls onboarding server on :3000
+
+# Authorization demo
+bun run demo      # in-process: mint → attenuate → exercise → deny → revoke
+bun run demo:up   # the gate + a sample API; see BUILD_DAY_DEMO.md
 ```
 
 ---
@@ -365,6 +539,8 @@ bun run example   # start the example Swirls onboarding server on :3000
 - Hosted dashboard to visualise sessions and pinpoint where agents succeed/fail.
 - First-class `auth.md` verifier helpers.
 - Richer artifact handling (checksums, auth'd downloads) and more adapters.
+- Canonical binary token encoding and conformance vectors for cross-language
+  macaroon interop (see [`docs/SPEC-AUTHZ.md`](./docs/SPEC-AUTHZ.md)).
 
 ---
 

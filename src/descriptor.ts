@@ -1,9 +1,25 @@
-import type { OnboardingDescriptor, Step } from "./types";
+import type { z } from "zod";
+import type { JsonSchema, OnboardingDescriptor, Step } from "./types";
 import { dependenciesOf } from "./steps";
 import { resolveBase } from "./urls";
 
 /** Protocol version emitted in the descriptor's `aboard` field. */
-export const PROTOCOL_VERSION = "0.1";
+export const PROTOCOL_VERSION = "0.2";
+
+/**
+ * Convert a Zod schema to a JSON Schema document, or `null` if absent. `io`
+ * selects the representation: `"input"` describes what the agent should *send*
+ * (before coercion/defaults), `"output"` what it will *receive back*.
+ *
+ * We call the schema's own `.toJSONSchema()` (rather than the bundled
+ * `z.toJSONSchema`) so conversion always runs against the same zod instance that
+ * created the schema — immune to version skew between our bundled zod and the
+ * consumer's.
+ */
+function toJsonSchema(schema: z.ZodType | undefined, io: "input" | "output"): JsonSchema | null {
+  if (!schema) return null;
+  return schema.toJSONSchema({ io }) as JsonSchema;
+}
 
 export interface DescriptorInput {
   name: string;
@@ -43,6 +59,8 @@ export function generateDescriptor(input: DescriptorInput): OnboardingDescriptor
       endpoint: `${base}/steps/${step.id}`,
       dependsOn: dependenciesOf(input.steps, step),
       artifact: step.artifact ?? null,
+      input_schema: toJsonSchema(step.input, "input"),
+      output_schema: toJsonSchema(step.output, "output"),
     })),
   };
 }

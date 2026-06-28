@@ -1,0 +1,21 @@
+{
+  "name": "@aboard/macaroon",
+  "version": "0.0.0",
+  "description": "Production-grade macaroons for TypeScript — mint, attenuate offline, verify. Zero runtime dependencies.",
+  "type": "module",
+  "license": "MIT",
+  "author": "ByteSlice LLC, DBA Swirls.ai",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}

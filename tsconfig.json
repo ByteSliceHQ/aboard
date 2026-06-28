@@ -25,5 +25,8 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+  // The admin app and the identity (BetterAuth) demo have their own toolchains
+  // and deps (React/Vite, better-auth) — keep them out of the library typecheck.
+  "exclude": ["node_modules", "**/dist", "packages/admin", "packages/identity"]
 }

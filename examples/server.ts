@@ -1,7 +1,8 @@
 /**
- * Example: a self-contained "Swirls" agent-onboarding server using the v0.1
+ * Example: a self-contained "Swirls" agent-onboarding server using the v0.2
  * spec — identity verification, a machine-readable descriptor, artifacts, a
- * stuck webhook, and the admin read endpoint.
+ * stuck webhook, the admin read endpoint, and typed step inputs/outputs via Zod
+ * (published as JSON Schema in the descriptor and prompt).
  *
  *   bun run examples/server.ts
  *
@@ -12,7 +13,8 @@
  * Then drive it with the example agent:
  *   bun run examples/agent.ts
  */
-import { aboard } from '../src/index'
+import { z } from 'zod'
+import { aboard, defineStep } from '../src/index'
 import { sqliteAdapter } from '../src/adapters/sqlite'
 
 const PORT = Number(process.env.PORT ?? 4319)
@@ -48,32 +50,34 @@ const ab = aboard({
   onStuck: { afterAttempts: 2, webhook: `${ORIGIN}/internal/stuck` },
   onEvent: (e) => console.log(`[event] ${e.type}${e.stepId ? ' ' + e.stepId : ''}`),
   steps: [
-    {
+    defineStep({
       id: 'create_org',
-      description: 'Provision the user\'s Swirls workspace. JSON body: { "name": string }.',
+      description: 'Provision the user\'s Swirls workspace.',
+      input: z.object({ name: z.string().min(1).describe('Workspace display name') }),
+      output: z.object({ orgId: z.string(), name: z.string() }),
+      // `body` is typed as { name: string }; the empty/missing-name case is now
+      // rejected by the schema before `run` is ever called.
       run: ({ body, principal, setMetadata }) => {
-        const name = (body as { name?: string } | undefined)?.name
-        if (!name) throw new Error('Provide an org `name` in the JSON body.')
         const id = `org_${swirls.orgs.size + 1}`
-        swirls.orgs.set(id, { id, name, owner: principal?.subject })
+        swirls.orgs.set(id, { id, name: body.name, owner: principal?.subject })
         setMetadata({ orgId: id })
-        return { orgId: id, name }
+        return { orgId: id, name: body.name }
       },
-    },
-    {
+    }),
+    defineStep({
       id: 'create_project',
-      description: 'Create the first project in the workspace. JSON body: { "project": string }.',
+      description: 'Create the first project in the workspace.',
+      input: z.object({ project: z.string().min(1).describe('Project name') }),
+      output: z.object({ projectId: z.string() }),
       run: ({ body, session, setMetadata }) => {
         const orgId = session.metadata.orgId
         if (!orgId) throw new Error('No workspace yet — complete create_org first.')
-        const project = (body as { project?: string } | undefined)?.project
-        if (!project) throw new Error('Provide a `project` name in the JSON body.')
         const id = `proj_${swirls.projects.size + 1}`
-        swirls.projects.set(id, { id, orgId, name: project })
+        swirls.projects.set(id, { id, orgId, name: body.project })
         setMetadata({ projectId: id })
         return { projectId: id }
       },
-    },
+    }),
     {
       id: 'starter_kit',
       description: 'Download the Swirls starter kit from the artifact URL, then call this step to acknowledge it.',
@@ -83,16 +87,13 @@ const ab = aboard({
         description: 'Project scaffold and example .swirls files.',
       },
     },
-    {
+    defineStep({
       id: 'deploy',
-      description: 'Deploy the project with the Swirls CLI, then confirm. JSON body: { "confirmed": true }.',
-      run: ({ body }) => {
-        if ((body as { confirmed?: boolean } | undefined)?.confirmed !== true) {
-          throw new Error('Run the deploy command, then call again with { "confirmed": true }.')
-        }
-        return { deployed: true, url: 'https://demo.swirls.dev' }
-      },
-    },
+      description: 'Deploy the project with the Swirls CLI, then confirm.',
+      input: z.object({ confirmed: z.literal(true).describe('Set once the deploy command has run') }),
+      output: z.object({ deployed: z.boolean(), url: z.string() }),
+      run: () => ({ deployed: true, url: 'https://demo.swirls.dev' }),
+    }),
   ],
 })
 

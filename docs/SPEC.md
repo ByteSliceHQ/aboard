@@ -1,4 +1,4 @@
-# aboard protocol — v0.1
+# aboard protocol — v0.2
 
 An open, implementation-independent protocol for **agent onboarding**: declaring
 the steps an AI agent should take to onboard a user, exposing them as discoverable
@@ -46,7 +46,7 @@ Field names are snake_case to match OAuth / `auth.md` metadata conventions.
 
 ```jsonc
 {
-  "aboard": "0.1",                  // protocol version
+  "aboard": "0.2",                  // protocol version
   "name": "Swirls",
   "slug": "default",
   "prompt_uri": "https://api.app.com/.well-known/agent-onboarding/default",
@@ -64,11 +64,22 @@ Field names are snake_case to match OAuth / `auth.md` metadata conventions.
       "description": "Provision a workspace via the API.",
       "endpoint": "https://api.app.com/api/onboarding/steps/create_org",
       "dependsOn": ["auth"],
-      "artifact": null
+      "artifact": null,
+      "input_schema": {                // JSON Schema for the request body, or null
+        "type": "object",
+        "properties": { "name": { "type": "string" } },
+        "required": ["name"]
+      },
+      "output_schema": null            // JSON Schema for the step's `output`, or null
     }
   ]
 }
 ```
+
+A step MAY declare an `input_schema` and/or `output_schema` (JSON Schema). When
+present, `input_schema` describes the body the agent should POST; clients SHOULD
+use it to construct valid requests. `output_schema` describes the `output`
+returned on success. Both are `null` when the step declares no schema.
 
 ## 2. Sessions
 
@@ -115,7 +126,13 @@ The server MUST:
 3. Reject unknown steps → `404 unknown_step`.
 4. Enforce dependencies. If prerequisites are incomplete →
    `409 unmet_dependencies` with `{ "missing": [...] }`.
-5. Run any server logic; record the attempt; advance progress.
+5. If the step declares an `input_schema`, validate the body against it. On
+   failure → `422 input_invalid` with an `issues` array describing what was
+   wrong. This counts as a step failure and contributes to stuck detection (§6).
+6. Run any server logic; record the attempt; advance progress.
+7. If the step declares an `output_schema`, validate the `run` result against
+   it. A mismatch is a server fault, not an agent fault → `500
+   step_output_invalid`; it does NOT contribute to stuck detection.
 
 Success `200`:
 
@@ -132,6 +149,8 @@ Success `200`:
 ```
 
 Failure `422`: `{ "ok": false, "status": "failed", "error": "…", "attempts": N, "next": "<same step>" }`.
+For input-validation failures `error` is `"input_invalid"` and an `issues` array
+is included.
 
 The flow is **complete** when a step response has `"next": null` and
 `progress.completed === progress.total`.
@@ -169,7 +188,9 @@ configured webhook: `{ event, sessionId, stepId, attempts, error, principal?, me
 | `403` | `session_revoked` | Session was abandoned |
 | `404` | `session_not_found` / `unknown_step` | No such session / step |
 | `409` | `unmet_dependencies` | Prerequisite steps incomplete |
+| `422` | `input_invalid` | Request body failed the step's `input_schema` (carries `issues`) |
 | `422` | (step error) | Step `run` failed |
+| `500` | `step_output_invalid` | `run` return failed the step's `output_schema` (server fault) |
 
 ## Versioning
 

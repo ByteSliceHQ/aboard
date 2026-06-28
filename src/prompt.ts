@@ -2,6 +2,17 @@ import type { Step } from "./types";
 import { dependenciesOf } from "./steps";
 import { resolveBase } from "./urls";
 
+/** Render a labelled, indented ```json fenced block for a JSON Schema bullet. */
+function pushSchemaBlock(lines: string[], label: string, schema: unknown): void {
+  lines.push(`- **${label}** (JSON Schema):`);
+  lines.push("");
+  lines.push("  ```json");
+  for (const line of JSON.stringify(schema, null, 2).split("\n")) {
+    lines.push(`  ${line}`);
+  }
+  lines.push("  ```");
+}
+
 export interface PromptInput {
   name: string;
   steps: Step[];
@@ -75,6 +86,12 @@ export function generatePrompt(input: PromptInput): string {
     lines.push(
       `- **Depends on:** ${deps.length ? deps.map((d) => `\`${d}\``).join(", ") : "— (may run first)"}`,
     );
+    if (step.input) {
+      pushSchemaBlock(lines, "Request body", step.input.toJSONSchema({ io: "input" }));
+    }
+    if (step.output) {
+      pushSchemaBlock(lines, "Response `output`", step.output.toJSONSchema({ io: "output" }));
+    }
     if (step.artifact) {
       const desc = step.artifact.description ? ` — ${step.artifact.description}` : "";
       lines.push(`- **Artifact:** download **${step.artifact.name}** from \`${step.artifact.url}\`${desc}`);

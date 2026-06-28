@@ -1,0 +1,18 @@
+{
+  "name": "@aboard/identity-demo",
+  "version": "0.0.0",
+  "description": "BetterAuth agent-auth identity server for the aboard authz demo.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run --hot server.ts",
+    "migrate": "bunx @better-auth/cli migrate -y --config auth.ts"
+  },
+  "dependencies": {
+    "better-auth": "^1.6.22",
+    "@better-auth/agent-auth": "^0.6.2",
+    "jose": "^6.0.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.195",
+    "zod": "^4.4.3"
+  }
+}

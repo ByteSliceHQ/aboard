@@ -30,7 +30,7 @@
   "files": [
     "dist",
     "README.md",
-    "SPEC.md",
+    "docs/SPEC.md",
     "LICENSE"
   ],
   "keywords": [
@@ -50,13 +50,36 @@
   "engines": {
     "bun": ">=1.0.0"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "test": "bun test",
+    "demo": "bun run examples/demo.ts",
+    "demo:proxy": "bun run examples/demo-proxy.ts",
+    "demo:migrate": "IDENTITY_DB=packages/identity/identity.sqlite bun run packages/identity/migrate.ts",
+    "demo:reset": "rm -f packages/identity/identity.sqlite* packages/identity/aboard.sqlite* && echo 'wiped identity.sqlite + aboard.sqlite'",
+    "demo:api": "bun run packages/identity/orders-api-server.ts",
+    "demo:identity": "IDENTITY_URL=http://localhost:3000 ABOARD_URL=http://localhost:3000 IDENTITY_DB=packages/identity/identity.sqlite ABOARD_DB=packages/identity/aboard.sqlite ORDERS_API_URL=http://localhost:5055 bun run packages/identity/aboard-server.ts",
+    "demo:up": "bun run demo:migrate && (bun run demo:api & bun run demo:identity & wait)",
+    "demo:agent:register": "ABOARD_URL=http://localhost:3000 bun run packages/identity/cli.ts register",
+    "demo:agent:get": "ABOARD_URL=http://localhost:3000 bun run packages/identity/cli.ts get",
+    "demo:agent:post": "ABOARD_URL=http://localhost:3000 bun run packages/identity/cli.ts post",
+    "demo:agent:delegate": "ABOARD_URL=http://localhost:3000 bun run packages/identity/cli.ts delegate",
+    "demo:agent:delegate-approval": "ABOARD_URL=http://localhost:3000 bun run packages/identity/cli.ts delegate-approval",
+    "demo:subagent:get": "ABOARD_URL=http://localhost:3000 bun run packages/identity/cli.ts sub-get",
+    "demo:subagent:post": "ABOARD_URL=http://localhost:3000 bun run packages/identity/cli.ts sub-post",
+    "demo:agentic": "ABOARD_URL=http://localhost:3000 bun run packages/identity/agentic.ts",
+    "demo:chat": "ABOARD_URL=http://localhost:3000 bun run packages/identity/chat.ts",
     "example": "bun run examples/server.ts",
     "example:agent": "bun run examples/agent.ts",
     "prepublishOnly": "bun run build"
+  },
+  "dependencies": {
+    "@aboard/macaroon": "workspace:*",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/bun": "latest",
